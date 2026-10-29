@@ -11,16 +11,18 @@
 #include "wifi_sta.h"
 #include "udp_tx.h"
 
+/* 1 = replace Bluetooth with a 440 Hz test tone, to test the WiFi link alone. */
 #define TEST_TONE 0
 
-#define RB_SIZE  32768
+#define RB_SIZE  32768   /* ~185 ms of audio; 48 KB overflows static RAM with BT + WiFi */
 
 static ring_buffer_t rb;
 static uint8_t rb_storage[RB_SIZE];
 
 #if TEST_TONE
-#define FRAMES_PER_TICK 441
+#define FRAMES_PER_TICK 441   /* 44100 Hz x 10 ms tick */
 
+/* Generates a sine wave at exactly the audio rate, paced by vTaskDelayUntil. */
 static void tone_producer(void *arg)
 {
     static int16_t buf[FRAMES_PER_TICK * 2];
@@ -46,6 +48,8 @@ static void tone_producer(void *arg)
 }
 #endif
 
+/* Central = distribution hub: Bluetooth in -> ring buffer -> UDP out.
+   It plays nothing itself, so it can be the single clock master later. */
 void app_main(void)
 {
     rb_init(&rb, rb_storage, sizeof(rb_storage));
@@ -56,14 +60,17 @@ void app_main(void)
     udp_tx_start(&rb);
     xTaskCreate(tone_producer, "tone", 4096, NULL, 5, NULL);
 #else
-    bt_sink_start(&rb);
-    wifi_sta_start();
+    bt_sink_start(&rb);   /* producer: Bluetooth PCM -> rb (also inits NVS, so first) */
+    wifi_sta_start();     /* join the satellite's network, wait for an IP */
 
+    /* WiFi carries far more data than A2DP: give it more radio time. */
     esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
 
-    udp_tx_start(&rb);
+    udp_tx_start(&rb);    /* consumer: rb -> UDP */
 #endif
 
+    /* Health log every 2 s. heap_min must stay well above zero: if an
+       allocation fails, the Bluetooth stack asserts and the board reboots. */
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(2000));
         udp_tx_stats_t st;

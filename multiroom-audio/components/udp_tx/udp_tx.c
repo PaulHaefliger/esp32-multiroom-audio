@@ -14,7 +14,7 @@ static const char *TAG = "udp_tx";
 
 static ring_buffer_t     *s_rb;
 static int                s_sock = -1;
-static struct sockaddr_in s_peer;
+static struct sockaddr_in s_peer;          /* satellite address, learned from its hello */
 static bool               s_have_peer = false;
 static udp_tx_stats_t     s_stats;
 
@@ -38,6 +38,7 @@ static int open_socket(void)
     return s;
 }
 
+/* Non-blocking. If a hello arrived, its sender becomes the destination. */
 static void poll_hello(void)
 {
     hello_pkt_t h;
@@ -59,6 +60,8 @@ static void poll_hello(void)
     s_have_peer = true;
 }
 
+/* ENOMEM = WiFi TX queue full. Wait a tick and retry, which pushes back on the
+   ring buffer instead of dropping; give up after 5 tries. */
 static void send_to_peer(const void *buf, size_t len)
 {
     for (int attempt = 0; attempt < 5; attempt++) {
@@ -77,16 +80,18 @@ static void send_to_peer(const void *buf, size_t len)
     s_stats.gave_up++;
 }
 
+/* Reads one payload from the ring buffer, adds the header, sends it. */
 static void udp_tx_task(void *arg)
 {
     uint8_t pkt[AUDIO_PKT_MAX] __attribute__((aligned(4)));
-    uint8_t *payload = pkt + sizeof(audio_pkt_hdr_t);
+    uint8_t *payload = pkt + sizeof(audio_pkt_hdr_t);   /* rb_read copies straight in here */
     uint32_t seq = 0;
     uint64_t frame_pos = 0;
 
     for (;;) {
         poll_hello();
 
+        /* Wait for a full payload; yield only when there isn't one. */
         if (rb_available_read(s_rb) < AUDIO_PAYLOAD_BYTES) {
             vTaskDelay(1);
             continue;
@@ -94,7 +99,8 @@ static void udp_tx_task(void *arg)
 
         rb_read(s_rb, payload, AUDIO_PAYLOAD_BYTES);
 
-        uint64_t chunk_pos = frame_pos;
+        /* frame_pos is media time: it advances even with nobody listening. */
+        uint64_t chunk_pos = frame_pos;   /* first frame of this chunk */
         frame_pos += AUDIO_PAYLOAD_BYTES / AUDIO_BYTES_PER_FRAME;
 
         if (!s_have_peer) {
@@ -108,7 +114,7 @@ static void udp_tx_task(void *arg)
             .payload_len = AUDIO_PAYLOAD_BYTES,
             .volume      = i2s_output_get_volume(),
         };
-        memcpy(pkt, &hdr, sizeof(hdr));
+        memcpy(pkt, &hdr, sizeof(hdr));   /* header goes in front of the payload */
 
         send_to_peer(pkt, sizeof(hdr) + AUDIO_PAYLOAD_BYTES);
     }

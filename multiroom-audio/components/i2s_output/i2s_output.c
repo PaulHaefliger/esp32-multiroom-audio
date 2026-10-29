@@ -8,18 +8,23 @@
 #include "ring_buffer.h"
 #include "i2s_output.h"
 
+/* MAX98357A wiring. No MCLK needed: the amp runs off BCLK. */
 #define I2S_BCLK_GPIO    GPIO_NUM_26
 #define I2S_LRCLK_GPIO   GPIO_NUM_25
 #define I2S_DOUT_GPIO    GPIO_NUM_27
 
 static i2s_chan_handle_t tx_chan;
 static ring_buffer_t *rb;
-#define CHUNK_BYTES 1024
+#define CHUNK_BYTES 1024   /* bytes per I2S write (256 stereo frames, ~5.8 ms) */
 
+/* Volume as Q15 gain (32767 = 1.0). Written by the volume setter, read by the
+   feed task: a lone scalar, so a relaxed atomic is enough. */
 static uint16_t s_gain_q15 = 32767;
 
+/* Raw AVRCP volume, kept so central can forward it in packet headers. */
 static uint8_t s_vol = 127;
 
+/* Diagnostic: logs ring buffer fill once per second. */
 static void rb_monitor_task(void *arg) {
     uint32_t secs = 0;
     for (;;) {
@@ -32,13 +37,17 @@ static void rb_monitor_task(void *arg) {
     }
 }
 
+/* Consumer: ring buffer -> volume -> I2S. i2s_channel_write blocks until DMA
+   has room, so the I2S clock paces this loop. */
 static void feed_task(void *arg) {
     uint8_t scratch[CHUNK_BYTES] __attribute__((aligned(4)));
     size_t n;
     size_t written;
-    bool refilling = true;
+    bool refilling = true;   /* start (and restart after underrun) with silence */
 
     for (;;) {
+        /* After an underrun, play silence until the buffer is back to 50%,
+           instead of limping along near empty. */
         if (refilling) {
             if (rb_available_read(rb) >= rb->capacity / 2) {
                 refilling = false;
@@ -50,10 +59,11 @@ static void feed_task(void *arg) {
         }
 
         n = rb_read(rb, scratch, CHUNK_BYTES);
-        if (n < CHUNK_BYTES) {
+        if (n < CHUNK_BYTES) {   /* underrun: pad with silence */
             memset(scratch + n, 0, CHUNK_BYTES - n);
             refilling = true;
         }
+        /* Gain loaded once per chunk; gain <= 1.0, so the product never overflows. */
         uint16_t gain = __atomic_load_n(&s_gain_q15, __ATOMIC_RELAXED);
         int16_t *samples = (int16_t *)scratch;
         for (size_t i = 0; i < CHUNK_BYTES / 2; i++) {
@@ -64,6 +74,7 @@ static void feed_task(void *arg) {
     }
 }
 
+/* AVRCP volume 0..127 -> Q15 gain. */
 void i2s_output_set_volume(uint8_t vol) {
     if (vol > 127) vol = 127;
     uint16_t g = (uint16_t)(((uint32_t)vol * 32767u) / 127u);
@@ -75,6 +86,7 @@ uint8_t i2s_output_get_volume(void) {
     return __atomic_load_n(&s_vol, __ATOMIC_RELAXED);
 }
 
+/* Configures I2S (44.1 kHz, 16-bit stereo, Philips format) and starts the feed task. */
 void i2s_output_start(ring_buffer_t *buffer) {
     rb = buffer;
     
@@ -98,6 +110,7 @@ void i2s_output_start(ring_buffer_t *buffer) {
     xTaskCreate(rb_monitor_task, "rb_mon", 2048, NULL, 3, NULL);
 }
 
+/* Unused. Racy if called while the feed task is writing. */
 void i2s_output_set_rate(uint32_t sample_rate) {
     i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
     i2s_channel_disable(tx_chan);

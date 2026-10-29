@@ -7,8 +7,9 @@
 #include "wifi_ap.h"
 #include "udp_rx.h"
 
-#define RB_SIZE        65536
-#define PREFILL_BYTES  (RB_SIZE / 2)
+/* Deep buffer to absorb bursty delivery. 44.1 kHz x 4 B = 176.4 kB/s. */
+#define RB_SIZE        65536          /* ~370 ms */
+#define PREFILL_BYTES  (RB_SIZE / 2)  /* ~185 ms buffered before playback starts */
 
 static const char *TAG = "satellite";
 
@@ -19,15 +20,17 @@ void app_main(void)
 {
     rb_init(&rb, rb_storage, sizeof(rb_storage));
 
-    wifi_ap_start();
-    udp_rx_start(&rb);
+    wifi_ap_start();       /* host the network central joins */
+    udp_rx_start(&rb);     /* producer: UDP -> rb */
 
+    /* Wait for headroom before playing, or the first WiFi hiccup underruns. */
     while (rb_available_read(&rb) < PREFILL_BYTES) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     ESP_LOGI(TAG, "prefilled %d bytes, starting playback", PREFILL_BYTES);
-    i2s_output_start(&rb);
+    i2s_output_start(&rb); /* consumer: rb -> I2S */
 
+    /* Health log every 2 s. */
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(2000));
         udp_rx_stats_t st;

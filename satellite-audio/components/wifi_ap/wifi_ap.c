@@ -8,6 +8,9 @@
 #include "audio_proto.h"
 #include "wifi_ap.h"
 
+/* The satellite (no Bluetooth) hosts the network, which avoids the unstable
+   SoftAP + Bluetooth coexistence case on central. */
+
 static const char *TAG = "wifi_ap";
 
 static void wifi_ap_event_handler(void *arg, esp_event_base_t event_base,
@@ -35,6 +38,7 @@ static void wifi_ap_event_handler(void *arg, esp_event_base_t event_base,
 
 void wifi_ap_start(void)
 {
+    /* No bt_sink here, so NVS (needed by the WiFi driver) is set up here. */
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -63,6 +67,7 @@ void wifi_ap_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+    /* 20 MHz: half the spectrum of 40 MHz, fewer collisions with central's Bluetooth. */
     ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW20));
 
     ESP_LOGI(TAG, "SoftAP started, SSID: %s (open), channel %d", NET_SSID, NET_CHANNEL);

@@ -14,7 +14,7 @@ static const char *TAG = "udp_rx";
 
 static ring_buffer_t     *s_rb;
 static int                s_sock = -1;
-static struct sockaddr_in s_hello_dst;
+static struct sockaddr_in s_hello_dst;   /* subnet broadcast address */
 static udp_rx_stats_t     s_stats;
 
 static int open_socket(void)
@@ -34,9 +34,12 @@ static int open_socket(void)
         close(s);
         return -1;
     }
+    /* recvfrom times out after 1 s of silence, so we can resend the hello
+       (recovers if central reboots and forgets us). */
     struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+    /* We don't know central's IP, so hellos are broadcast. */
     int yes = 1;
     setsockopt(s, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
 
@@ -53,6 +56,7 @@ static void send_hello(void)
            (struct sockaddr *)&s_hello_dst, sizeof(s_hello_dst));
 }
 
+/* Receive -> validate -> loss accounting -> ring buffer. */
 static void udp_rx_task(void *arg)
 {
     uint8_t pkt[AUDIO_PKT_MAX] __attribute__((aligned(4)));
@@ -77,6 +81,7 @@ static void udp_rx_task(void *arg)
             continue;
         }
 
+        /* Copy the header out instead of casting: the struct is packed. */
         audio_pkt_hdr_t hdr;
         memcpy(&hdr, pkt, sizeof(hdr));
         size_t payload_len = (size_t)n - sizeof(hdr);
@@ -87,8 +92,10 @@ static void udp_rx_task(void *arg)
         }
 
         if (have_last) {
+            /* Unsigned subtraction survives wraparound; the signed cast tells
+               ahead (>0) from duplicate/late (<=0). */
             int32_t delta = (int32_t)(hdr.seq - last_seq);
-            if (delta <= 0) {
+            if (delta <= 0) {   /* late or duplicate: worthless for a stream */
                 s_stats.bad++;
                 continue;
             }
@@ -99,12 +106,15 @@ static void udp_rx_task(void *arg)
 
         i2s_output_set_volume(hdr.volume);
 
+        /* Latency clamp: after a stall central sends a catch-up burst. Drop
+           above 70% fill so latency doesn't jump and stay high. */
         if (rb_available_read(s_rb) > s_rb->capacity * 7 / 10) {
             s_stats.trimmed++;
             s_stats.packets++;
             continue;
         }
 
+        /* Whole packet or nothing, so samples never misalign. */
         if (rb_available_write(s_rb) < payload_len) {
             s_stats.overflow_bytes += payload_len;
             s_stats.packets++;
@@ -124,6 +134,7 @@ void udp_rx_start(ring_buffer_t *rb)
         ESP_LOGE(TAG, "not starting");
         return;
     }
+    /* Priority 6, above the feed task (5), so incoming packets are drained promptly. */
     xTaskCreate(udp_rx_task, "udp_rx", 4096, NULL, 6, NULL);
 }
 

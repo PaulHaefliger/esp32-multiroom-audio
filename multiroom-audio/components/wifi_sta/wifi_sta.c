@@ -10,11 +10,15 @@
 #include "audio_proto.h"
 #include "wifi_sta.h"
 
+/* Central joins the satellite's network as a station: Espressif rates
+   station + Classic Bluetooth as stable, but SoftAP + Bluetooth as unstable. */
+
 #define GOT_IP_BIT  BIT0
 
 static const char *TAG = "wifi_sta";
 static EventGroupHandle_t s_evt;
 
+/* Connect on start, reconnect on drop, signal once an IP is assigned. */
 static void wifi_sta_event_handler(void *arg, esp_event_base_t base,
                                    int32_t id, void *data)
 {
@@ -34,6 +38,7 @@ static void wifi_sta_event_handler(void *arg, esp_event_base_t base,
 
 void wifi_sta_start(void)
 {
+    /* Harmless if bt_sink already initialized NVS. */
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -64,12 +69,16 @@ void wifi_sta_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
+    /* 20 MHz uses half the spectrum of 40 MHz: fewer collisions with Bluetooth. */
     ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW20));
 
+/* Power save adds receive latency, but the driver requires it when Bluetooth
+   is on. Central mostly transmits, so it doesn't hurt here. */
 #if !CONFIG_BT_ENABLED
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 #endif
 
     ESP_LOGI(TAG, "joining %s ...", NET_SSID);
+    /* Block until we have an IP, so sockets can be opened right after. */
     xEventGroupWaitBits(s_evt, GOT_IP_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
 }
