@@ -10,15 +10,6 @@ A phone streams music over Bluetooth A2DP to a **central** node, which forwards 
 
 ## Architecture
 
-```
-  Phone                    Central (ESP32)                         Satellite (ESP32)
- ┌──────┐  A2DP   ┌──────────────────────────────┐  UDP   ┌─────────────────────────────────┐
- │      │ ──────► │ bt_sink ─► ring buffer ─► udp_tx │ ────► │ udp_rx ─► ring buffer ─► i2s_output │ ─► MAX98357A ─► speaker
- └──────┘  (SBC)  │          (32 KB, ~185 ms)        │ WiFi  │          (64 KB, ~370 ms)           │
-                  │ WiFi station                     │       │ WiFi SoftAP (hosts the network)     │
-                  └──────────────────────────────────┘       └─────────────────────────────────────┘
-```
-
 - **Central** is a pure distribution hub: it never plays audio itself, so it can be the single clock master for the sync layer.
 - **Satellites** buffer deeply and play out over I2S. The MAX98357A needs no MCLK and runs off the ESP32's I2S clock, which is what makes APLL-based drift correction possible later.
 - Every stage is decoupled by a **lock-free single-producer/single-consumer ring buffer**, so a stall in one execution context (Bluetooth stack, WiFi driver, I2S DMA) never blocks another.
@@ -143,18 +134,6 @@ Both nodes print health lines every 2 s:
 
 - **Central:** `sent`, `enomem`, `gave_up`, ring-buffer fill, `bt_drop`, `heap`, `heap_min`
 - **Satellite:** `rx`, `lost`, `bad`, `trimmed`, `overflow`, plus buffer fill each second
-
-## Roadmap
-
-- [x] I2S tone and embedded-PCM playback
-- [x] A2DP sink + lock-free ring buffer
-- [x] AVRCP absolute volume (Q15 gain)
-- [x] WiFi transport: central → satellite over UDP
-- [ ] **Clock sync:** NTP-style round-trip offset estimation; playback scheduled on `frame_pos`
-- [ ] **Drift correction:** fractional APLL tuning on each satellite, no sample insertion or deletion
-- [ ] **Measured validation:** GPIO markers on both boards, skew measured with a logic analyzer
-- [ ] Multiple satellites
-- [ ] Custom PCB (KiCad)
 
 ## Known limitations
 
